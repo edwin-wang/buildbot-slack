@@ -2,12 +2,28 @@
 
 from __future__ import absolute_import, print_function
 
-from twisted.internet import defer
+from urllib.parse import quote_plus as urlquote_plus
 
+from twisted.internet import defer
+from twisted.python import log
+
+from buildbot.process.properties import Interpolate
 from buildbot.process.properties import Properties
+from buildbot.process.results import CANCELLED
+from buildbot.process.results import EXCEPTION
+from buildbot.process.results import FAILURE
+from buildbot.process.results import RETRY
+from buildbot.process.results import SKIPPED
+from buildbot.process.results import SUCCESS
+from buildbot.process.results import WARNINGS
+from buildbot.reporters.base import ReporterBase
+from buildbot.reporters.generators.build import BuildStartEndStatusGenerator
+from buildbot.reporters.message import MessageFormatterRenderable
+from buildbot.util import giturlparse
+from buildbot.util import httpclientservice
+
 from buildbot.process.results import statusToString
 from buildbot.reporters import http, utils
-from buildbot.util import httpclientservice
 from buildbot.util.logger import Logger
 
 logger = Logger()
@@ -33,12 +49,13 @@ STATUS_COLORS = {
 DEFAULT_HOST = "https://hooks.slack.com"  # deprecated
 
 
-class SlackStatusPush(http.HttpStatusPushBase):
+class SlackStatusPush(ReporterBase):
     name = "SlackStatusPush"
     neededDetails = dict(wantProperties=True)
 
     def checkConfig(
-        self, endpoint, channel=None, host_url=None, username=None, **kwargs
+        self, endpoint, channel=None, host_url=None, username=None, verbose=False,
+        debug=None, verify=None, generators=None, **kwargs
     ):
         if not isinstance(endpoint, str):
             logger.warning(
@@ -77,12 +94,20 @@ class SlackStatusPush(http.HttpStatusPushBase):
         channel=None,
         host_url=None,  # deprecated
         username=None,
-        attachments=True,
         verbose=False,
+        debug=None, verify=None, generators=None,
+        attachments=True,
         **kwargs
     ):
+        self.debug = debug
+        self.verify = verify
+        self.verbose = verbose
 
-        yield super().reconfigService(**kwargs)
+        if generators is None:
+            generators = self._create_default_generators()
+
+        yield super().reconfigService(generators=generators, **kwargs)
+        #yield super().reconfigService(**kwargs)
 
         self.baseUrl = host_url and host_url.rstrip("/")  # deprecated
         if host_url:
@@ -102,8 +127,17 @@ class SlackStatusPush(http.HttpStatusPushBase):
         self.verbose = verbose
         self.project_ids = {}
 
+    def _create_default_generators(self):
+        start_formatter = MessageFormatterRenderable('Build started.')
+        end_formatter = MessageFormatterRenderable('Build done.')
+
+        return [
+            BuildStartEndStatusGenerator(start_formatter=start_formatter,
+                                         end_formatter=end_formatter)
+        ]
+
     @defer.inlineCallbacks
-    def getAttachments(self, build, key):
+    def getAttachments(self, build):
         sourcestamps = build["buildset"]["sourcestamps"]
         attachments = []
 
@@ -160,12 +194,12 @@ class SlackStatusPush(http.HttpStatusPushBase):
         return attachments
 
     @defer.inlineCallbacks
-    def getBuildDetailsAndSendMessage(self, build, key):
+    def getBuildDetailsAndSendMessage(self, build):
         yield utils.getDetailsForBuild(self.master, build, **self.neededDetails)
-        text = yield self.getMessage(build, key)
+        text = yield self.getMessage(build)
         postData = {}
         if self.attachments:
-            attachments = yield self.getAttachments(build, key)
+            attachments = yield self.getAttachments(build)
             if attachments:
                 postData["attachments"] = attachments
         else:
@@ -178,32 +212,34 @@ class SlackStatusPush(http.HttpStatusPushBase):
         postData["icon_emoji"] = STATUS_EMOJIS.get(
             statusToString(build["results"]), ":facepalm:"
         )
-        extra_params = yield self.getExtraParams(build, key)
+        extra_params = yield self.getExtraParams(build)
         postData.update(extra_params)
         return postData
 
-    def getMessage(self, build, event_name):
+    def getMessage(self, build):
         event_messages = {
-            "new": "Buildbot started build %s" % build["builder"]["name"],
-            "finished": "Buildbot finished build %s with result: %s"
+            False: "Buildbot started build %s" % build["builder"]["name"],
+            True: "Buildbot finished build %s with result: %s"
             % (build["builder"]["name"], statusToString(build["results"])),
         }
-        return event_messages.get(event_name, "")
+        return event_messages.get(build['complete'], "")
 
     # returns a Deferred that returns None
-    def buildStarted(self, key, build):
-        return self.send(build, key[2])
+    def buildStarted(self, reports):
+        return self.sendMessage(reports)
 
     # returns a Deferred that returns None
-    def buildFinished(self, key, build):
-        return self.send(build, key[2])
+    def buildFinished(self, reports):
+        return self.sendMessage(reports)
 
-    def getExtraParams(self, build, event_name):
+    def getExtraParams(self, build):
         return {}
 
     @defer.inlineCallbacks
-    def send(self, build, key):
-        postData = yield self.getBuildDetailsAndSendMessage(build, key)
+    def sendMessage(self, reports):
+        report = reports[0]
+        build = report['builds'][0]
+        postData = yield self.getBuildDetailsAndSendMessage(build)
         if not postData:
             return
 
