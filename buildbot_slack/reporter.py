@@ -167,6 +167,13 @@ class SlackStatusPush(ReporterBase):
                     fields.append(
                         {"title": "Repository", "value": repositories, "short": True}
                     )
+                # Add duration
+                if build['complete']:
+                    duration = self.formatDuration(build['complete_at'] - build[
+                        'started_at'])
+                    fields.append(
+                        {"title": "Duration", "value": duration, "short": True}
+                    )
                 responsible_users = yield utils.getResponsibleUsersForBuild(
                     self.master, build["buildid"]
                 )
@@ -192,6 +199,23 @@ class SlackStatusPush(ReporterBase):
                 }
             )
         return attachments
+
+    def formatDuration(self, duration):
+        """Format the duration.
+
+        This method could be overridden if really needed, as the duration format in gerrit
+        is an arbitrary string.
+        :param duration: duration in timedelta
+        """
+        days = duration.days
+        hours, remainder = divmod(duration.seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        if days:
+            return '{} day{} {}h {}m {}s'.format(days, "s" if days > 1 else "",
+                                                 hours, minutes, seconds)
+        elif hours:
+            return '{}h {}m {}s'.format(hours, minutes, seconds)
+        return '{}m {}s'.format(minutes, seconds)
 
     @defer.inlineCallbacks
     def getBuildDetailsAndSendMessage(self, build):
